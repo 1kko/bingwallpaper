@@ -10,17 +10,19 @@ from urllib.request import urlopen, urlretrieve
 from pathlib import Path, PurePath
 import logging
 import json
-from typing import Optional, Union, Tuple
+from typing import Optional, Tuple, Union
 import subprocess
+import platform
+import argparse
 
 
-# operating system
-class OS:
-    """Operating System Constants
+def getPlatform() -> str:
+    """Get current platform and returns platform in string
+
+    Returns:
+        str: platform string (eg. 'Windows', 'Linux', 'macOS', etc)
     """
-    WINDOWS = "win32"
-    LINUX = "linux"
-    MACOS = "macosx"
+    return platform.system()
 
 
 def getBingMetadata(width: int, height: int) -> json:
@@ -35,69 +37,84 @@ def getBingMetadata(width: int, height: int) -> json:
 
 
 # I grabbed and modified a bit from code here: https://stackoverflow.com/a/21213145
-def getOSResolution() -> Tuple[OS, int, int]:
+def getResolution() -> Tuple[int, int]:
     """Detect OS and screen resolution.
 
     Returns:
-        Tuple[OS, int, int]: (os_type, screen_width, screen_height) 
+        Tuple[int, int]: (screen_width, screen_height) 
             where screen_width and screen_height are int types according to measurement.
-            In case all fails, it returns default value: ('linux', 1920, 1080)
+            In case all fails, it returns default value: (1920, 1080)
     """
 
-    try:  # Platforms supported by GTK3, Fx Linux/BSD
-        from gi.repository import Gdk
-        screen = Gdk.Screen.get_default()
-        width = screen.get_width()
-        height = screen.get_height()
-        return (OS.LINUX, width, height)
-    except:
+    currentPlatform = getPlatform()
+    fallBackSize = (1920, 1080)
+
+    def _fallback():
+        # Failover
+        logging.warning(
+            f"Failed to detect OS and Screen resolution. Falling back to {fallBackSize}")
+        return fallBackSize
+
+    if currentPlatform == "Linux":
+        try:  # Platforms supported by GTK3, Fx Linux/BSD
+            from gi.repository import Gdk
+            screen = Gdk.Screen.get_default()
+            width = screen.get_width()
+            height = screen.get_height()
+            return (width, height)
+        except:
+            try:
+                import Xlib.display
+                screen = Xlib.display.Display().screen().root.get_geometry()
+                width = screen.width
+                height = screen.height
+                return (width, height)
+            except:
+                try:  # Linux/Unix
+                    args = ["xrandr", "-q", "-d", ":0"]
+                    proc = subprocess.Popen(args, stdout=subprocess.PIPE)
+                    for line in iter(proc.stdout.readline, ''):
+                        if isinstance(line, bytes):
+                            line = line.decode("utf-8")
+                        if "Screen" in line:
+                            width = int(line.split()[7])
+                            height = int(line.split()[9][:-1])
+                            return (width, height)
+                except:
+                    _fallback()
+
+    elif currentPlatform == "Windows":
         try:  # Windows only
             from win32api import GetSystemMetrics
-            width_px = GetSystemMetrics(0)
-            height_px = GetSystemMetrics(1)
-            return (OS.WINDOWS, width_px, height_px)
+            width = GetSystemMetrics(0)
+            height = GetSystemMetrics(1)
+            return (width, height)
+
         except:
             try:  # Windows only
                 import ctypes
                 user32 = ctypes.windll.user32
-                width_px = user32.GetSystemMetrics(0)
-                height_px = user32.GetSystemMetrics(1)
-                return (OS.WINDOWS, width_px, height_px)
+                width = user32.GetSystemMetrics(0)
+                height = user32.GetSystemMetrics(1)
+                return (width, height)
             except:
-                try:  # Mac OS X only
-                    import AppKit
-                    for screen in AppKit.NSScreen.screens():
-                        width_px = screen.frame().size.width
-                        height_px = screen.frame().size.height
-                        return (OS.MACOS, width_px, height_px)
-                except:
-                    try:  # Linux/Unix
-                        import Xlib.display
-                        resolution = Xlib.display.Display().screen().root.get_geometry()
-                        width_px = resolution.width
-                        height_px = resolution.height
-                        return (OS.LINUX, width_px, height_px)
-                    except:
-                        try:  # Linux/Unix
-                            args = ["xrandr", "-q", "-d", ":0"]
-                            proc = subprocess.Popen(
-                                args, stdout=subprocess.PIPE)
-                            for line in iter(proc.stdout.readline, ''):
-                                if isinstance(line, bytes):
-                                    line = line.decode("utf-8")
-                                if "Screen" in line:
-                                    width_px = int(line.split()[7])
-                                    height_px = int(line.split()[9][:-1])
-                                    return (OS.LINUX, width_px, height_px)
-                        except:
-                            # Failover
-                            screensize = (OS.LINUX, 1920, 1080)
-                            logging.warning(
-                                "Failed to detect OS and Screen resolution. Falling back to %s:%sx%s" % screensize)
-                            return screensize
+                _fallback()
+
+    elif currentPlatform == "macOS":
+        try:  # Mac OS X only
+            import AppKit
+            for screen in AppKit.NSScreen.screens():
+                width = screen.frame().size.width
+                height = screen.frame().size.height
+                return (width, height)
+        except:
+            _fallback()
+
+    else:
+        _fallback()
 
 
-def downloadWallpaper(nDaysAgo: Optional[int] = 0, overwrite: Optional[bool] = False) -> Union[OS, Path]:
+def downloadWallpaper(nDaysAgo: Optional[int] = 0, overwrite: Optional[bool] = False) -> Union[Path, dict]:
     """Download wallpaper
 
     Args:
@@ -105,9 +122,10 @@ def downloadWallpaper(nDaysAgo: Optional[int] = 0, overwrite: Optional[bool] = F
         overwrite (Optional[bool], optional): Downloads any if set to True. Defaults to False.
 
     Returns:
-        Union[OS, Path]: OS constant and Path object from Pathlib.
+        Path: Pathlib object specifies path of image file.
+        dict: Metadata related to image file.
     """
-    platform, width, height = getOSResolution()
+    width, height = getResolution()
     metadata = getBingMetadata(width, height)
 
     # metadata is ordered recent date first.
@@ -140,24 +158,25 @@ def downloadWallpaper(nDaysAgo: Optional[int] = 0, overwrite: Optional[bool] = F
         with open(jsonPath, "w") as jfp:
             json.dump(target, jfp)
 
-    return platform, imagePath
+    return imagePath, target
 
 
-def setWallpaper(platform: OS, imagePath: Path) -> bool:
+def setWallpaper(imagePath: Path) -> bool:
     """Sets Wallpaper
 
     Args:
-        platform (OS):  Different action to set wallpaper is taken according to platform
         imagePath (Path): Path to wallpaper
 
     Returns:
         bool: True if successful, otherwise False
     """
+
+    currentPlatform = getPlatform()
     if not imagePath.is_file():
         logging.error(f"{imagePath} is not found")
         return False
 
-    if platform == OS.WINDOWS:
+    if currentPlatform == "Windows":
         import ctypes
         logging.info(f"Setting {imagePath} as a wallpaper")
         uiAction = 20  # SPI_SETDESKWALLPAPER = 0x0014 or 20 in decimal
@@ -173,7 +192,7 @@ def setWallpaper(platform: OS, imagePath: Path) -> bool:
             logging.error("Setting wallpaper has failed.")
             return False
 
-    elif platform == OS.LINUX:
+    elif currentPlatform == "Linux":
         command = ["gsettings", "set", "org.gnome.desktop.background",
                    "picture-uri", f"file://{str(imagePath)}"]
         process = subprocess.Popen(
@@ -184,7 +203,11 @@ def setWallpaper(platform: OS, imagePath: Path) -> bool:
         else:
             return False
 
-    elif platform == OS.MACOS:
+    elif currentPlatform == "macOS":
+        # might need to try if current method doesn't work
+        # https://apple.stackexchange.com/a/145174
+        # sqlite3 ~/Library/Application\ Support/Dock/desktoppicture.db "update data set value = '/path/to/any/picture.png'" && killall Dock
+
         command = ["osascript", "-e",
                    "'tell application \"Finder\" to set desktop picture to POSIX file \"{imagePath}\"'"]
         process = subprocess.Popen(
@@ -199,5 +222,17 @@ def setWallpaper(platform: OS, imagePath: Path) -> bool:
 
 
 if __name__ == "__main__":
-    platform, imagePath = downloadWallpaper()
-    setWallpaper(platform, imagePath)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-n', '--ndays', help="Number of previous days to retrieve.",
+                        dest="nDaysAgo", default=0, type=int)
+    parser.add_argument('-m', '--metadata',
+                        help="output metadata to stdout.", dest="showJson", action=argparse.BooleanOptionalAction)
+
+    showJson = parser.parse_args().showJson
+    nDaysAgo = parser.parse_args().nDaysAgo
+    nDaysAgo = 7 if nDaysAgo >= 7 else nDaysAgo
+    nDaysAgo = 0 if nDaysAgo <= 0 else nDaysAgo
+    imagePath, metadata = downloadWallpaper(nDaysAgo=nDaysAgo)
+    if showJson and metadata is not None:
+        print(json.dumps(metadata, indent=4, sort_keys=True))
+    setWallpaper(imagePath)
